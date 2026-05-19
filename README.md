@@ -1,6 +1,7 @@
 # Interference Analysis App
 
-Streamlit app for comparing **Control vs Interference** conditions across selected analytes.
+Streamlit app for comparing Control vs Interference conditions across selected analytes.
+
 App site: https://interferenceblood.streamlit.app/
 
 ## Features
