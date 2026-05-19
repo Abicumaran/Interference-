@@ -1,6 +1,7 @@
 # Interference Analysis App
 
 Streamlit app for comparing **Control vs Interference** conditions across selected analytes.
+App site: https://interferenceblood.streamlit.app/
 
 ## Features
 
@@ -21,8 +22,8 @@ Streamlit app for comparing **Control vs Interference** conditions across select
   - Levene mean-centered equal-variance test
   - Brown-Forsythe median-centered equal-variance test
 - Statistical tests:
-  - Welch two-sample t-test as primary test
-  - Student t-test for reference
+  - Welch two-sample t-test as primary test (doesn't assume equal variance)
+  - Student t-test for reference only
   - Mann-Whitney U robust check
   - Permutation p-value for mean difference
   - Optional paired t-test/Wilcoxon if sample keys match
