@@ -11,7 +11,7 @@ st.title("Interference Analysis: Control vs Interference")
 st.caption("Compare control vs interference conditions with mean/median shift, assumption checks, optional outlier removal, bootstrap CIs, and downloadable outputs.")
 
 ID_HINTS = ["batch_id", "bloodSampleId", "bloodSampleID", "sampleId", "deviceId", "serialNumber", "patientUserId"]
-DEFAULT_ANALYTE_HINTS = ["RBC", "WBC_2", "PLT_3", "HCT", "HGB", "MCV_3", "RDW_3", "MCH", "MCHC", "NEUT_2", "LYMPH_2", "MXD_2", "PLT", "MCV", "RDW"]
+DEFAULT_ANALYTE_HINTS = ["RBC", "WBC_2", "PLT", "HCT", "HGB", "MCV", "RDW", "MCH", "MCHC", "NEUT_2", "LYMPH_2", "MXD_2", "PLT_3", "MCV_3", "RDW_3"]
 AUTO_OUTLIER_METHOD = "Automatic: Shapiro-Wilk -> Gcrit if normal, Robust MAD if non-normal"
 GCRIT_OUTLIER_METHOD = "Gcrit Grubbs-like: remove largest |value-mean|/SD if >= Gcrit"
 MAD_OUTLIER_METHOD = "Robust MAD modified-z: remove largest robust z if >= threshold"
@@ -512,10 +512,18 @@ with c2:
     int_val = st.selectbox("Interference/test condition", options=conditions, index=1 if len(conditions)>1 else 0)
 
 numcols = numeric_cols(df_eligible)
+# Put the same requested analytes first as in the Short-Term app, while retaining
+# every other numeric column as an optional choice.
 def_default = [c for c in DEFAULT_ANALYTE_HINTS if c in numcols]
+ordered_numcols = def_default + [c for c in numcols if c not in def_default]
 if not def_default:
-    def_default = numcols[:10]
-analytes = st.multiselect("Analyte columns to compare", options=numcols, default=def_default)
+    def_default = ordered_numcols[:10]
+analytes = st.multiselect(
+    "Analyte columns to compare",
+    options=ordered_numcols,
+    default=def_default,
+    help="Select exactly which analytes to analyze. Suggested analytes are ordered the same way as in the Short-Term app.",
+)
 
 st.subheader("2) Analysis settings")
 c1, c2, c3, c4 = st.columns(4)
