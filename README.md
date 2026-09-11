@@ -1,48 +1,20 @@
-# Interference Analysis App
+# Interference Analysis: Control vs Interference — updated
 
-Streamlit app for comparing Control vs Interference conditions across selected analytes.
+The existing Welch/Mann-Whitney, assumption-check, outlier, effect-size, paired-sensitivity and FDR calculations are retained. The requested automatic branch/output behavior is now explicit.
 
-App site: https://interferenceblood.streamlit.app/
+- Global-flag selector and “treat all rows as FALSE” override.
+- `global_flag=TRUE` rows are excluded before analysis and exported in their own worksheet.
+- Default analyte order: RBC, WBC_2, PLT_3, HCT, HGB, MCV_3, RDW_3, MCH, MCHC, NEUT_2, LYMPH_2, MXD_2, PLT, MCV, RDW.
+- Paired analysis is off by default.
+- Bootstrap 95% CIs are off by default.
+- Automatic outlier mode is default: Shapiro-Wilk residual normality selects existing Gcrit when normal and existing Robust MAD otherwise.
+- Automatic Gcrit is default.
+- Single primary inferential outcome: normal residuals -> Welch t-test; non-normal/not-testable residuals -> Mann-Whitney U. Both diagnostic p-values remain available for audit, but `Statistical Test Applied` / `Selected p value` are the single reported branch outcome.
+- One downloadable Excel workbook only, including raw/cleaned summaries, outlier log, `global flag TRUE`, condition/device counts, sensitivity table, optional paired sheets, and settings.
 
-## Features
-
-- Upload Excel or CSV.
-- Select condition, device, batch, and sample columns.
-- Select analytes to compare.
-- Default analysis pools all devices; optional per-device + pooled analysis.
-- Reports raw results with no outlier removal.
-- Optional outlier sensitivity analysis with:
-  - Gcrit / Grubbs-like largest-deviation removal
-  - Robust MAD modified-z removal
-  - 95% robust interval removal: median ± z × MAD-scaled SD
-- User can remove up to 0, 1, or 2 outliers per condition × analyte × scope.
-- Saves an outlier log with batch ID, sample ID, device ID, condition, analyte, value removed, and metric.
-- Reports cleaned results after outlier removal and a raw-vs-cleaned sensitivity table.
-- Assumption checks:
-  - Shapiro-Wilk on residuals
-  - Levene mean-centered equal-variance test
-  - Brown-Forsythe median-centered equal-variance test
-- Statistical tests:
-  - Welch two-sample t-test as primary test (doesn't assume equal variance)
-  - Student t-test for reference only
-  - Mann-Whitney U robust check
-  - Permutation p-value for mean difference
-  - Optional paired t-test/Wilcoxon if sample keys match
-- Effect sizes:
-  - mean difference
-  - median difference
-  - percent mean shift
-  - percent median shift
-  - bootstrap 95% confidence intervals
-- Download CSVs or full ZIP with CSV + Excel workbook.
-
-## Run locally
+Run with:
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Deploy on Streamlit Community Cloud
-
-Use `app.py` as the main file path.
