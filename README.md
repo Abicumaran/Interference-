@@ -1,5 +1,7 @@
 # Interference Analysis: Control vs Interference — updated
 
+https://interferenceblood.streamlit.app/
+
 The existing Welch/Mann-Whitney, assumption-check, outlier, effect-size, paired-sensitivity and FDR calculations are retained. The requested automatic branch/output behavior is now explicit.
 
 - Global-flag selector and “treat all rows as FALSE” override.
