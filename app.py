@@ -492,17 +492,17 @@ def compare_paired(df_sub, analyte, cond_col, control_val, int_val, pair_cols, n
 
 INTERFERENCE_SUMMARY_COLUMNS = [
     "scope", "result_type", "analyte", "n_C", "n_I", "Shapiro-Wilk\np value",
-    "Are the data\nnormally distributed?", "Statistical Test Applied", "Welch test\np value",
-    "Mann-Whitney U test\np value", "Is difference significant", "mean_C", "sd_C", "median_C", "iqr_C",
+    "Are the data\nnormally distributed?", "Statistical Test Applied", "Recommended p value",
+    "BH-FDR corrected p value (q)", "Statistically significant?", "mean_C", "sd_C", "median_C", "iqr_C",
     "mean_I", "sd_I", "median_I", "iqr_I", "mean_difference_I_minus_C", "median_difference_I_minus_C",
     "percent_shift_mean", "percent_shift_median", "mad_sd_control", "mad_sd_interference", "levene_mean_p",
     "brown_forsythe_median_p", "equal_variance_levene", "equal_variance_brown_forsythe", "student_t_p_equal_var",
     "welch_t_p_primary", "mann_whitney_p_robust", "permutation_p_mean_diff", "mean_difference_welch_95CI_low",
     "mean_difference_welch_95CI_high", "welch_satterthwaite_df", "percent_shift_mean_normal_95CI_low",
     "percent_shift_mean_normal_95CI_high", "hodges_lehmann_shift_I_minus_C", "control_condition",
-    "interference_condition", "outlier_method", "n_outliers_removed", "selected_raw_p_value", "recommended_p_value",
+    "interference_condition", "outlier_method", "n_outliers_removed",
     "selected_effect_estimate", "selected_95CI_low", "selected_95CI_high", "welch_t_q_BH_FDR_within_table",
-    "mann_whitney_q_BH_FDR_within_table", "selected_q_BH_FDR", "final_multiple_testing_decision",
+    "mann_whitney_q_BH_FDR_within_table", "final_multiple_testing_decision",
 ]
 OUTLIER_LOG_COLUMNS = [
     "scope", "condition", "analyte", "removed_order", "outlier_method", "row_index", "batch_id", "sample_id",
@@ -546,15 +546,17 @@ def format_interference_summary(tbl: pd.DataFrame, control_val: str, int_val: st
     out["Shapiro-Wilk\np value"] = get("shapiro_wilk_p_residuals")
     out["Are the data\nnormally distributed?"] = get("residuals_normal")
     out["Statistical Test Applied"] = get("primary_test")
-    # The supplied template intentionally leaves these two display columns empty;
-    # the selected p-value is reported once later in the row. Full method-specific
-    # p-values remain in the audit columns welch_t_p_primary / mann_whitney_p_robust.
-    out["Welch test\np value"] = np.nan
-    out["Mann-Whitney U test\np value"] = np.nan
-    # Match the reportable decision in the supplied workbook: significance is
-    # based on the automatically selected branch after BH-FDR correction, not
-    # on an unadjusted competing p-value.
-    out["Is difference significant"] = get("selected_q_BH_FDR").apply(lambda x: bool(x < alpha) if pd.notna(x) else None)
+    # Report the one p-value selected by the normality-guided inferential branch,
+    # matching the TR report structure (Test -> p value -> significance).
+    out["Recommended p value"] = get("recommended_p_value")
+    # Also surface the Benjamini-Hochberg FDR-adjusted value for the same selected
+    # branch. Method-specific p/q values remain later in the row for auditability.
+    out["BH-FDR corrected p value (q)"] = get("selected_q_BH_FDR")
+    # TR-style significance is based on the reported/recommended selected p-value.
+    # The BH-FDR decision is retained later in final_multiple_testing_decision.
+    out["Statistically significant?"] = get("recommended_p_value").apply(
+        lambda x: "YES" if pd.notna(x) and float(x) < float(alpha) else ("No" if pd.notna(x) else None)
+    )
     for prefix, source in [("mean_C",f"mean_{control_val}"),("sd_C",f"sd_{control_val}"),("median_C",f"median_{control_val}"),("iqr_C",f"iqr_{control_val}"),
                            ("mean_I",f"mean_{int_val}"),("sd_I",f"sd_{int_val}"),("median_I",f"median_{int_val}"),("iqr_I",f"iqr_{int_val}")]:
         out[prefix] = get(source)
@@ -565,9 +567,9 @@ def format_interference_summary(tbl: pd.DataFrame, control_val: str, int_val: st
         "permutation_p_mean_diff", "mean_difference_welch_95CI_low", "mean_difference_welch_95CI_high",
         "welch_satterthwaite_df", "percent_shift_mean_normal_95CI_low", "percent_shift_mean_normal_95CI_high",
         "hodges_lehmann_shift_I_minus_C", "control_condition", "interference_condition", "outlier_method",
-        "n_outliers_removed", "selected_raw_p_value", "recommended_p_value", "selected_effect_estimate",
+        "n_outliers_removed", "selected_effect_estimate",
         "selected_95CI_low", "selected_95CI_high", "welch_t_q_BH_FDR_within_table",
-        "mann_whitney_q_BH_FDR_within_table", "selected_q_BH_FDR", "final_multiple_testing_decision",
+        "mann_whitney_q_BH_FDR_within_table", "final_multiple_testing_decision",
     ]
     for c in passthrough:
         out[c] = get(c)
@@ -914,4 +916,4 @@ st.download_button(
     "interference_results.xlsx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-st.success("Done. The single Excel workbook matches the supplied five-sheet results template and reports one automatically selected inferential branch per analyte.")
+st.success("Done. Raw and cleaned summaries now show the selected test, Recommended p value, BH-FDR corrected p value (q), and TR-style statistical significance as the primary report columns.")
