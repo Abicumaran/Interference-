@@ -11,7 +11,7 @@ st.title("Interference Analysis: Control vs Interference")
 st.caption("Compare control vs interference conditions with mean/median shift, assumption checks, optional outlier removal, bootstrap CIs, and downloadable outputs.")
 
 ID_HINTS = ["batch_id", "bloodSampleId", "bloodSampleID", "sampleId", "deviceId", "serialNumber", "patientUserId"]
-DEFAULT_ANALYTE_HINTS = ["RBC", "WBC_2", "PLT", "HCT", "HGB", "MCV", "RDW", "MCH", "MCHC", "NEUT_2", "LYMPH_2", "MXD_2", "PLT_3", "MCV_3", "RDW_3"]
+DEFAULT_ANALYTE_HINTS = ["RBC", "WBC_2", "PLT_3", "HCT", "HGB", "MCV_3", "RDW_3", "MCH", "MCHC", "NEUT_2", "LYMPH_2", "MXD_2", "PLT", "MCV", "RDW"]
 AUTO_OUTLIER_METHOD = "Automatic: Shapiro-Wilk -> Gcrit if normal, Robust MAD if non-normal"
 GCRIT_OUTLIER_METHOD = "Gcrit Grubbs-like: remove largest |value-mean|/SD if >= Gcrit"
 MAD_OUTLIER_METHOD = "Robust MAD modified-z: remove largest robust z if >= threshold"
@@ -154,6 +154,69 @@ def assumption_checks(x, y):
     return shapiro_p, lev_mean_p, brown_p
 
 
+def welch_mean_difference_ci(x, y, alpha=0.05):
+    """Welch-Satterthwaite CI for mean(I)-mean(C)."""
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    x = x[np.isfinite(x)]; y = y[np.isfinite(y)]
+    if len(x) < 2 or len(y) < 2:
+        return np.nan, np.nan, np.nan, np.nan
+    diff = float(np.mean(y) - np.mean(x))
+    vx = float(np.var(x, ddof=1)); vy = float(np.var(y, ddof=1))
+    se2 = vx/len(x) + vy/len(y)
+    if not np.isfinite(se2) or se2 <= 0:
+        return diff, np.nan, np.nan, np.nan
+    se = np.sqrt(se2)
+    df = se2**2 / (((vx/len(x))**2)/(len(x)-1) + ((vy/len(y))**2)/(len(y)-1))
+    tcrit = stats.t.ppf(1-alpha/2, df)
+    return diff, float(diff-tcrit*se), float(diff+tcrit*se), float(df)
+
+
+def percent_shift_delta_ci(x, y, alpha=0.05):
+    """Delta-method normal CI for 100*(mean(I)-mean(C))/mean(C)."""
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    x = x[np.isfinite(x)]; y = y[np.isfinite(y)]
+    if len(x) < 2 or len(y) < 2:
+        return np.nan, np.nan, np.nan
+    mx, my = float(np.mean(x)), float(np.mean(y))
+    if mx == 0:
+        return np.nan, np.nan, np.nan
+    est = 100.0*(my-mx)/mx
+    vx = float(np.var(x, ddof=1))/len(x); vy = float(np.var(y, ddof=1))/len(y)
+    var_g = (100.0*my/(mx**2))**2*vx + (100.0/mx)**2*vy
+    if not np.isfinite(var_g) or var_g < 0:
+        return est, np.nan, np.nan
+    z = stats.norm.ppf(1-alpha/2)
+    se = np.sqrt(var_g)
+    return float(est), float(est-z*se), float(est+z*se)
+
+
+def hodges_lehmann_shift(x, y, max_pairs=2000000, seed=1):
+    """Independent-samples Hodges-Lehmann location shift: median of I-C pairwise differences."""
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    x = x[np.isfinite(x)]; y = y[np.isfinite(y)]
+    if len(x) == 0 or len(y) == 0:
+        return np.nan
+    total = len(x)*len(y)
+    if total <= int(max_pairs):
+        return float(np.median((y[:,None]-x[None,:]).ravel()))
+    rng = np.random.default_rng(seed)
+    ix = rng.integers(0, len(x), size=int(max_pairs)); iy = rng.integers(0, len(y), size=int(max_pairs))
+    return float(np.median(y[iy]-x[ix]))
+
+
+def bootstrap_hodges_lehmann_ci(x, y, n_boot=2000, seed=1, alpha=0.05):
+    rng = np.random.default_rng(seed)
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
+    x = x[np.isfinite(x)]; y = y[np.isfinite(y)]
+    if len(x) < 2 or len(y) < 2:
+        return np.nan, np.nan
+    vals=[]
+    for _ in range(int(n_boot)):
+        xb=rng.choice(x,len(x),replace=True); yb=rng.choice(y,len(y),replace=True)
+        vals.append(hodges_lehmann_shift(xb,yb,max_pairs=200000,seed=int(rng.integers(1,2**31-1))))
+    return ci_quantiles(vals, alpha=alpha)
+
+
 def normalize_bool(value) -> bool:
     if pd.isna(value):
         return False
@@ -171,33 +234,26 @@ def choose_automatic_outlier_method(x, y) -> str:
 
 
 def choose_primary_outcome(row: Dict, alpha: float) -> Dict:
-    """Return one inferential outcome: Welch for normal residuals, Mann-Whitney otherwise."""
+    """Select exactly one reportable branch from the normality diagnostic."""
     normal = row.get("residuals_normal", None) is True
     if normal:
         row["statistical_branch"] = "parametric"
         row["primary_test"] = "Welch t-test"
-        row["recommended_p_value"] = row.get("welch_t_p_primary", np.nan)
-        row["selected_effect_type"] = "mean difference I-C"
-        row["selected_effect"] = row.get("mean_difference_I_minus_C", np.nan)
-        row["selected_percent_shift"] = row.get("percent_shift_mean", np.nan)
-        row["selected_effect_95CI_low"] = row.get("mean_difference_95CI_low", np.nan)
-        row["selected_effect_95CI_high"] = row.get("mean_difference_95CI_high", np.nan)
+        row["selected_raw_p_value"] = row.get("welch_t_p_primary", np.nan)
+        row["recommended_p_value"] = row["selected_raw_p_value"]
+        row["selected_effect_estimate"] = row.get("mean_difference_I_minus_C", np.nan)
+        row["selected_95CI_low"] = row.get("mean_difference_welch_95CI_low", np.nan)
+        row["selected_95CI_high"] = row.get("mean_difference_welch_95CI_high", np.nan)
     else:
         row["statistical_branch"] = "nonparametric"
         row["primary_test"] = "Mann-Whitney U"
-        row["recommended_p_value"] = row.get("mann_whitney_p_robust", np.nan)
-        row["selected_effect_type"] = "median difference I-C"
-        row["selected_effect"] = row.get("median_difference_I_minus_C", np.nan)
-        row["selected_percent_shift"] = row.get("percent_shift_median", np.nan)
-        row["selected_effect_95CI_low"] = row.get("median_difference_95CI_low", np.nan)
-        row["selected_effect_95CI_high"] = row.get("median_difference_95CI_high", np.nan)
-    p = row.get("recommended_p_value", np.nan)
+        row["selected_raw_p_value"] = row.get("mann_whitney_p_robust", np.nan)
+        row["recommended_p_value"] = row["selected_raw_p_value"]
+        row["selected_effect_estimate"] = row.get("hodges_lehmann_shift_I_minus_C", np.nan)
+        row["selected_95CI_low"] = row.get("hodges_lehmann_shift_95CI_low", np.nan)
+        row["selected_95CI_high"] = row.get("hodges_lehmann_shift_95CI_high", np.nan)
+    p = row.get("selected_raw_p_value", np.nan)
     row["significant_at_alpha"] = bool(p < alpha) if np.isfinite(p) else None
-    row["Shapiro-Wilk p value"] = row.get("shapiro_wilk_p_residuals", np.nan)
-    row["Are the data normally distributed?"] = row.get("residuals_normal", None)
-    row["Statistical Test Applied"] = row.get("primary_test", "")
-    row["Selected p value"] = p
-    row["Is difference significant"] = row.get("significant_at_alpha", None)
     return row
 
 
@@ -383,7 +439,24 @@ def compare_unpaired(x, y, control_label, int_label, n_boot, do_boot, seed):
     try: row["mann_whitney_p_robust"] = stats.mannwhitneyu(x, y, alternative="two-sided").pvalue
     except Exception: row["mann_whitney_p_robust"] = np.nan
     row["permutation_p_mean_diff"] = permutation_pvalue_unpaired(x, y, seed=seed) if len(x) >= 2 and len(y) >= 2 else np.nan
+    _, wlo, whi, wdf = welch_mean_difference_ci(x, y)
+    row["mean_difference_welch_95CI_low"] = wlo
+    row["mean_difference_welch_95CI_high"] = whi
+    row["welch_satterthwaite_df"] = wdf
+    _, plo, phi = percent_shift_delta_ci(x, y)
+    row["percent_shift_mean_normal_95CI_low"] = plo
+    row["percent_shift_mean_normal_95CI_high"] = phi
+    row["hodges_lehmann_shift_I_minus_C"] = hodges_lehmann_shift(x, y, seed=seed)
+    row["hodges_lehmann_shift_95CI_low"] = np.nan
+    row["hodges_lehmann_shift_95CI_high"] = np.nan
+    row["mean_difference_95CI_low"] = np.nan; row["mean_difference_95CI_high"] = np.nan
+    row["percent_shift_mean_95CI_low"] = np.nan; row["percent_shift_mean_95CI_high"] = np.nan
+    row["median_difference_95CI_low"] = np.nan; row["median_difference_95CI_high"] = np.nan
+    row["percent_shift_median_95CI_low"] = np.nan; row["percent_shift_median_95CI_high"] = np.nan
     if do_boot:
+        hlo, hhi = bootstrap_hodges_lehmann_ci(x, y, n_boot=n_boot, seed=seed+77)
+        row["hodges_lehmann_shift_95CI_low"] = hlo
+        row["hodges_lehmann_shift_95CI_high"] = hhi
         lo, hi = bootstrap_unpaired(x, y, lambda xb,yb: np.mean(yb)-np.mean(xb), n_boot=n_boot, seed=seed)
         row["mean_difference_95CI_low"] = lo; row["mean_difference_95CI_high"] = hi
         lo, hi = bootstrap_unpaired(x, y, lambda xb,yb: 100*(np.mean(yb)-np.mean(xb))/np.mean(xb) if np.mean(xb)!=0 else np.nan, n_boot=n_boot, seed=seed+11)
@@ -417,36 +490,224 @@ def compare_paired(df_sub, analyte, cond_col, control_val, int_val, pair_cols, n
         row["paired_mean_difference_95CI_low"] = lo; row["paired_mean_difference_95CI_high"] = hi
     return row, paired
 
-def make_excel_output(result_tables: Dict[str, pd.DataFrame], settings: pd.DataFrame) -> bytes:
-    """Return one Excel file with multiple sheets; no CSV/ZIP side outputs."""
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        used = set()
-        for name, table in result_tables.items():
-            if table is None:
-                continue
-            sheet = re.sub(r"[^A-Za-z0-9_ ]+", "_", name)[:31] or "sheet"
-            base = sheet
-            i = 1
-            while sheet in used:
-                suffix = f"_{i}"; sheet = base[:31-len(suffix)] + suffix; i += 1
-            used.add(sheet)
-            table.to_excel(writer, sheet_name=sheet, index=False)
-        settings.to_excel(writer, sheet_name="settings", index=False)
+INTERFERENCE_SUMMARY_COLUMNS = [
+    "scope", "result_type", "analyte", "n_C", "n_I", "Shapiro-Wilk\np value",
+    "Are the data\nnormally distributed?", "Statistical Test Applied", "Welch test\np value",
+    "Mann-Whitney U test\np value", "Is difference significant", "mean_C", "sd_C", "median_C", "iqr_C",
+    "mean_I", "sd_I", "median_I", "iqr_I", "mean_difference_I_minus_C", "median_difference_I_minus_C",
+    "percent_shift_mean", "percent_shift_median", "mad_sd_control", "mad_sd_interference", "levene_mean_p",
+    "brown_forsythe_median_p", "equal_variance_levene", "equal_variance_brown_forsythe", "student_t_p_equal_var",
+    "welch_t_p_primary", "mann_whitney_p_robust", "permutation_p_mean_diff", "mean_difference_welch_95CI_low",
+    "mean_difference_welch_95CI_high", "welch_satterthwaite_df", "percent_shift_mean_normal_95CI_low",
+    "percent_shift_mean_normal_95CI_high", "hodges_lehmann_shift_I_minus_C", "control_condition",
+    "interference_condition", "outlier_method", "n_outliers_removed", "selected_raw_p_value", "recommended_p_value",
+    "selected_effect_estimate", "selected_95CI_low", "selected_95CI_high", "welch_t_q_BH_FDR_within_table",
+    "mann_whitney_q_BH_FDR_within_table", "selected_q_BH_FDR", "final_multiple_testing_decision",
+]
+OUTLIER_LOG_COLUMNS = [
+    "scope", "condition", "analyte", "removed_order", "outlier_method", "row_index", "batch_id", "sample_id",
+    "device_id", "value_removed", "direction", "outlier_metric", "outlier_threshold", "gcrit_mode", "gcrit_alpha",
+    "gcrit_tail", "details",
+]
+GLOBAL_FLAG_COLUMNS = ["batch_id", "condition", "analyte", "sample_id", "global_flag"]
 
-        from openpyxl.styles import Font, PatternFill, Alignment
-        fill = PatternFill("solid", fgColor="D9EAD3")
+
+def finalize_selected_fdr(tbl: pd.DataFrame, alpha: float) -> pd.DataFrame:
+    if tbl is None or tbl.empty:
+        return tbl.copy() if isinstance(tbl, pd.DataFrame) else pd.DataFrame()
+    out = tbl.copy()
+    out["welch_t_q_BH_FDR_within_table"] = benjamini_hochberg(out["welch_t_p_primary"].values)
+    out["mann_whitney_q_BH_FDR_within_table"] = benjamini_hochberg(out["mann_whitney_p_robust"].values)
+    out["selected_q_BH_FDR"] = np.where(
+        out["residuals_normal"].eq(True),
+        out["welch_t_q_BH_FDR_within_table"],
+        out["mann_whitney_q_BH_FDR_within_table"],
+    )
+    out["significant_after_BH_FDR"] = out["selected_q_BH_FDR"] < float(alpha)
+    out["final_multiple_testing_decision"] = np.where(
+        out["significant_after_BH_FDR"],
+        "Significant interference detected",
+        "No statistically significant interference detected",
+    )
+    return out
+
+
+def format_interference_summary(tbl: pd.DataFrame, control_val: str, int_val: str, alpha: float) -> pd.DataFrame:
+    """Match the supplied interference_results_example workbook column-for-column."""
+    if tbl is None or tbl.empty:
+        return pd.DataFrame(columns=INTERFERENCE_SUMMARY_COLUMNS)
+    out = pd.DataFrame(index=tbl.index)
+    get = lambda c: tbl[c] if c in tbl.columns else pd.Series(np.nan, index=tbl.index)
+    out["scope"] = get("scope")
+    out["result_type"] = get("result_type")
+    out["analyte"] = get("analyte")
+    out["n_C"] = get(f"n_{control_val}")
+    out["n_I"] = get(f"n_{int_val}")
+    out["Shapiro-Wilk\np value"] = get("shapiro_wilk_p_residuals")
+    out["Are the data\nnormally distributed?"] = get("residuals_normal")
+    out["Statistical Test Applied"] = get("primary_test")
+    # The supplied template intentionally leaves these two display columns empty;
+    # the selected p-value is reported once later in the row. Full method-specific
+    # p-values remain in the audit columns welch_t_p_primary / mann_whitney_p_robust.
+    out["Welch test\np value"] = np.nan
+    out["Mann-Whitney U test\np value"] = np.nan
+    # Match the reportable decision in the supplied workbook: significance is
+    # based on the automatically selected branch after BH-FDR correction, not
+    # on an unadjusted competing p-value.
+    out["Is difference significant"] = get("selected_q_BH_FDR").apply(lambda x: bool(x < alpha) if pd.notna(x) else None)
+    for prefix, source in [("mean_C",f"mean_{control_val}"),("sd_C",f"sd_{control_val}"),("median_C",f"median_{control_val}"),("iqr_C",f"iqr_{control_val}"),
+                           ("mean_I",f"mean_{int_val}"),("sd_I",f"sd_{int_val}"),("median_I",f"median_{int_val}"),("iqr_I",f"iqr_{int_val}")]:
+        out[prefix] = get(source)
+    passthrough = [
+        "mean_difference_I_minus_C", "median_difference_I_minus_C", "percent_shift_mean", "percent_shift_median",
+        "mad_sd_control", "mad_sd_interference", "levene_mean_p", "brown_forsythe_median_p", "equal_variance_levene",
+        "equal_variance_brown_forsythe", "student_t_p_equal_var", "welch_t_p_primary", "mann_whitney_p_robust",
+        "permutation_p_mean_diff", "mean_difference_welch_95CI_low", "mean_difference_welch_95CI_high",
+        "welch_satterthwaite_df", "percent_shift_mean_normal_95CI_low", "percent_shift_mean_normal_95CI_high",
+        "hodges_lehmann_shift_I_minus_C", "control_condition", "interference_condition", "outlier_method",
+        "n_outliers_removed", "selected_raw_p_value", "recommended_p_value", "selected_effect_estimate",
+        "selected_95CI_low", "selected_95CI_high", "welch_t_q_BH_FDR_within_table",
+        "mann_whitney_q_BH_FDR_within_table", "selected_q_BH_FDR", "final_multiple_testing_decision",
+    ]
+    for c in passthrough:
+        out[c] = get(c)
+    return out[INTERFERENCE_SUMMARY_COLUMNS].reset_index(drop=True)
+
+
+def make_excel_output(result_tables: Dict[str, pd.DataFrame]) -> bytes:
+    """Return the exact five-sheet single workbook requested in the supplied example."""
+    buf = io.BytesIO()
+    sheet_order = [
+        "interference_summary_raw", "interference_summary_cleaned", "outlier_log", "global flag TRUE", "condition_device_counts"
+    ]
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for name in sheet_order:
+            table = result_tables.get(name, pd.DataFrame())
+            table.to_excel(writer, sheet_name=name, index=False)
+
+        from openpyxl.styles import Font, Alignment
         for ws in writer.book.worksheets:
             ws.freeze_panes = "A2"
             if ws.max_row and ws.max_column:
                 ws.auto_filter.ref = ws.dimensions
             for cell in ws[1]:
-                cell.font = Font(bold=True); cell.fill = fill; cell.alignment = Alignment(vertical="center", wrap_text=True)
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
             for cells in ws.columns:
                 letter = cells[0].column_letter
                 width = max((len(str(c.value)) if c.value is not None else 0 for c in cells[:min(ws.max_row, 200)]), default=8) + 2
                 ws.column_dimensions[letter].width = min(max(width, 10), 42)
     return buf.getvalue()
+
+
+def run_interference_analysis(df_eligible: pd.DataFrame, df_global_excluded: pd.DataFrame, *,
+                              cond_col: str, control_val: str, int_val: str, device_col: str,
+                              batch_col: str, sample_col: str, global_flag_col: str,
+                              analytes: List[str], device_mode: str, paired_mode: bool,
+                              do_boot: bool, n_boot: int, alpha: float, seed: int,
+                              outlier_method: str, max_remove_per_condition: int,
+                              gcrit_mode: str, gcrit: float, gcrit_alpha: float, gcrit_tail: str,
+                              modified_z_threshold: float, robust_interval_z: float) -> Dict[str, object]:
+    """Pure analysis runner used by the UI and regression tests."""
+    df2 = df_eligible.copy()
+    df2[cond_col] = df2[cond_col].astype(str)
+    df2 = df2[df2[cond_col].isin([str(control_val), str(int_val)])].copy()
+    df2["__condition_str__"] = df2[cond_col].astype(str)
+    if device_col == "None":
+        df2["__device__"] = "pooled"
+        device_col_use = "__device__"
+    else:
+        device_col_use = device_col
+        df2[device_col_use] = df2[device_col_use].astype(str)
+
+    if sample_col != "None":
+        df2["__pair_key__"] = df2.apply(lambda r: extract_pair_key_from_sample(r[sample_col], r[cond_col]), axis=1)
+    else:
+        df2["__pair_key__"] = df2.groupby(cond_col).cumcount().astype(str)
+
+    scopes = [("pooled_all_devices", df2.copy())]
+    if device_mode.startswith("Analyze each"):
+        for dev, sdf in df2.groupby(device_col_use):
+            scopes.append((f"device_{dev}", sdf.copy()))
+
+    summary_raw_rows, summary_clean_rows, outlier_logs = [], [], []
+    paired_raw_rows, paired_clean_rows = [], []
+    for scope_name, sdf in scopes:
+        for analyte in analytes:
+            cols = [cond_col, "__condition_str__", analyte, device_col_use, "__pair_key__"]
+            for extra in [batch_col, sample_col]:
+                if extra != "None" and extra in sdf.columns and extra not in cols:
+                    cols.append(extra)
+            work = sdf[cols].copy()
+            work[analyte] = pd.to_numeric(work[analyte], errors="coerce")
+
+            x_raw = work.loc[work["__condition_str__"] == str(control_val), analyte].dropna().values
+            y_raw = work.loc[work["__condition_str__"] == str(int_val), analyte].dropna().values
+            row_raw = compare_unpaired(x_raw, y_raw, str(control_val), str(int_val), int(n_boot), bool(do_boot), int(seed))
+            row_raw.update({"scope": scope_name, "analyte": analyte, "result_type": "raw_no_outlier_removal",
+                            "control_condition": control_val, "interference_condition": int_val,
+                            "outlier_method": "None", "n_outliers_removed": 0})
+            summary_raw_rows.append(choose_primary_outcome(row_raw, float(alpha)))
+
+            actual_outlier_method = outlier_method
+            if outlier_method == AUTO_OUTLIER_METHOD:
+                actual_outlier_method = choose_automatic_outlier_method(x_raw, y_raw)
+            cleaned = work.copy(); log_df = pd.DataFrame()
+            if actual_outlier_method != "None" and int(max_remove_per_condition) > 0:
+                cleaned, log_df = apply_outlier_removal_for_analyte(
+                    work, analyte, control_val, int_val, actual_outlier_method, int(max_remove_per_condition), float(gcrit),
+                    float(modified_z_threshold), float(robust_interval_z), batch_col, sample_col, device_col_use, scope_name,
+                    gcrit_mode, float(gcrit_alpha), gcrit_tail
+                )
+                if not log_df.empty:
+                    outlier_logs.append(log_df)
+
+            x_clean = cleaned.loc[cleaned["__condition_str__"] == str(control_val), analyte].dropna().values
+            y_clean = cleaned.loc[cleaned["__condition_str__"] == str(int_val), analyte].dropna().values
+            row_clean = compare_unpaired(x_clean, y_clean, str(control_val), str(int_val), int(n_boot), bool(do_boot), int(seed))
+            row_clean.update({"scope": scope_name, "analyte": analyte, "result_type": "cleaned_after_outlier_rule",
+                              "control_condition": control_val, "interference_condition": int_val,
+                              "outlier_method": actual_outlier_method,
+                              "n_outliers_removed": int(len(work) - len(cleaned))})
+            summary_clean_rows.append(choose_primary_outcome(row_clean, float(alpha)))
+
+            if paired_mode:
+                pair_cols = ["__pair_key__"] if scope_name == "pooled_all_devices" else ["__pair_key__", device_col_use]
+                prow, _ = compare_paired(work, analyte, cond_col, str(control_val), str(int_val), pair_cols, int(n_boot), bool(do_boot), int(seed))
+                if prow is not None:
+                    prow.update({"scope": scope_name, "analyte": analyte, "result_type": "raw_no_outlier_removal"})
+                    paired_raw_rows.append(prow)
+                pcrow, _ = compare_paired(cleaned, analyte, cond_col, str(control_val), str(int_val), pair_cols, int(n_boot), bool(do_boot), int(seed))
+                if pcrow is not None:
+                    pcrow.update({"scope": scope_name, "analyte": analyte, "result_type": "cleaned_after_outlier_rule"})
+                    paired_clean_rows.append(pcrow)
+
+    summary_raw_internal = finalize_selected_fdr(pd.DataFrame(summary_raw_rows), float(alpha))
+    summary_clean_internal = finalize_selected_fdr(pd.DataFrame(summary_clean_rows), float(alpha))
+    summary_raw = format_interference_summary(summary_raw_internal, str(control_val), str(int_val), float(alpha))
+    summary_clean = format_interference_summary(summary_clean_internal, str(control_val), str(int_val), float(alpha))
+
+    outlier_log = pd.concat(outlier_logs, ignore_index=True) if outlier_logs else pd.DataFrame(columns=OUTLIER_LOG_COLUMNS)
+    for c in OUTLIER_LOG_COLUMNS:
+        if c not in outlier_log.columns: outlier_log[c] = np.nan
+    outlier_log = outlier_log[OUTLIER_LOG_COLUMNS]
+
+    excluded_for_conditions = df_global_excluded[df_global_excluded[cond_col].astype(str).isin([str(control_val), str(int_val)])].copy() if not df_global_excluded.empty else df_global_excluded.copy()
+    global_log = global_flag_audit(excluded_for_conditions, analytes, cond_col, batch_col, sample_col, global_flag_col if global_flag_col != "None" else "")
+    for c in GLOBAL_FLAG_COLUMNS:
+        if c not in global_log.columns: global_log[c] = np.nan
+    global_log = global_log[GLOBAL_FLAG_COLUMNS]
+    counts = df2.groupby([cond_col, device_col_use], dropna=False).size().reset_index(name="n_rows")
+
+    return {
+        "interference_summary_raw": summary_raw,
+        "interference_summary_cleaned": summary_clean,
+        "outlier_log": outlier_log,
+        "global flag TRUE": global_log,
+        "condition_device_counts": counts,
+        "paired_summary_raw": pd.DataFrame(paired_raw_rows),
+        "paired_summary_cleaned": pd.DataFrame(paired_clean_rows),
+    }
 
 
 # ------------------------- UI -------------------------
@@ -578,7 +839,7 @@ if outlier_method.startswith("Gcrit") and gcrit_mode.startswith("Automatic"):
 st.markdown("""
 **Single inferential outcome:** Shapiro-Wilk residual normality selects the existing branch: normal residuals → Welch two-sample t-test; non-normal/not-testable residuals → Mann-Whitney U.  
 **Assumption checks:** Shapiro-Wilk on residuals, classic Levene, and Brown-Forsythe/median-centered Levene.  
-**Outlier outputs:** the app always reports raw results; if outlier removal is selected, it also reports cleaned results, a raw-vs-cleaned shift table, and an outlier log with batch/sample/device/value.
+**Outlier outputs:** the app retains the raw result as an audit baseline and reports one cleaned result after the automatically selected outlier rule, plus a separate outlier log. It does not export competing sensitivity/statistical-choice tables.
 """)
 
 if not analytes:
@@ -589,133 +850,24 @@ run = st.button("Run interference analysis", type="primary")
 if not run:
     st.stop()
 
-# prepare data
-if global_flag_col == "None" and not treat_all_global_false:
-    st.error("Select a Global flag column, or tick the option to treat all rows as global_flag = FALSE.")
-    st.stop()
-df2 = df_eligible.copy()
-df2[cond_col] = df2[cond_col].astype(str)
-df2 = df2[df2[cond_col].isin([str(control_val), str(int_val)])].copy()
-df2["__condition_str__"] = df2[cond_col].astype(str)
-if device_col == "None":
-    df2["__device__"] = "pooled"
-    device_col_use = "__device__"
-else:
-    device_col_use = device_col
-    df2[device_col_use] = df2[device_col_use].astype(str)
-
-if sample_col != "None":
-    df2["__pair_key__"] = df2.apply(lambda r: extract_pair_key_from_sample(r[sample_col], r[cond_col]), axis=1)
-else:
-    df2["__pair_key__"] = df2.groupby(cond_col).cumcount().astype(str)
-
-scopes = [("pooled_all_devices", df2.copy())]
-if device_mode.startswith("Analyze each"):
-    for dev, sdf in df2.groupby(device_col_use):
-        scopes.append((f"device_{dev}", sdf.copy()))
-
-summary_raw_rows = []
-summary_clean_rows = []
-outlier_logs = []
-paired_raw_rows = []
-paired_clean_rows = []
-paired_detail_tables = {}
-
-for scope_name, sdf in scopes:
-    for analyte in analytes:
-        cols = [cond_col, "__condition_str__", analyte, device_col_use, "__pair_key__"]
-        for extra in [batch_col, sample_col]:
-            if extra != "None" and extra in sdf.columns and extra not in cols:
-                cols.append(extra)
-        work = sdf[cols].copy()
-        work[analyte] = pd.to_numeric(work[analyte], errors="coerce")
-
-        # raw result
-        x_raw = work.loc[work["__condition_str__"] == str(control_val), analyte].dropna().values
-        y_raw = work.loc[work["__condition_str__"] == str(int_val), analyte].dropna().values
-        row_raw = compare_unpaired(x_raw, y_raw, str(control_val), str(int_val), int(n_boot), bool(do_boot), int(seed))
-        row_raw.update({"scope": scope_name, "analyte": analyte, "result_type": "raw_no_outlier_removal", "control_condition": control_val, "interference_condition": int_val, "outlier_method": "None", "n_outliers_removed": 0})
-        row_raw = choose_primary_outcome(row_raw, float(alpha))
-        summary_raw_rows.append(row_raw)
-
-        # cleaned/sensitivity result
-        cleaned = work.copy()
-        log_df = pd.DataFrame()
-        actual_outlier_method = outlier_method
-        if outlier_method == AUTO_OUTLIER_METHOD:
-            actual_outlier_method = choose_automatic_outlier_method(x_raw, y_raw)
-        if actual_outlier_method != "None" and int(max_remove_per_condition) > 0:
-            cleaned, log_df = apply_outlier_removal_for_analyte(
-                work, analyte, control_val, int_val, actual_outlier_method, int(max_remove_per_condition), float(gcrit),
-                float(modified_z_threshold), float(robust_interval_z), batch_col, sample_col, device_col_use, scope_name,
-                gcrit_mode, float(gcrit_alpha), gcrit_tail
-            )
-            if not log_df.empty:
-                log_df["outlier_method_requested"] = outlier_method
-                log_df["outlier_method_used"] = actual_outlier_method
-            if not log_df.empty:
-                outlier_logs.append(log_df)
-
-        x_clean = cleaned.loc[cleaned["__condition_str__"] == str(control_val), analyte].dropna().values
-        y_clean = cleaned.loc[cleaned["__condition_str__"] == str(int_val), analyte].dropna().values
-        row_clean = compare_unpaired(x_clean, y_clean, str(control_val), str(int_val), int(n_boot), bool(do_boot), int(seed))
-        row_clean.update({"scope": scope_name, "analyte": analyte, "result_type": "cleaned_after_outlier_rule", "control_condition": control_val, "interference_condition": int_val, "outlier_method": actual_outlier_method, "outlier_method_requested": outlier_method, "n_outliers_removed": int(len(work) - len(cleaned))})
-        row_clean = choose_primary_outcome(row_clean, float(alpha))
-        summary_clean_rows.append(row_clean)
-
-        # paired raw and cleaned
-        if paired_mode:
-            pair_cols = ["__pair_key__"] if scope_name == "pooled_all_devices" else ["__pair_key__", device_col_use]
-            prow, pdetail = compare_paired(work, analyte, cond_col, str(control_val), str(int_val), pair_cols, int(n_boot), bool(do_boot), int(seed))
-            if prow is not None:
-                prow.update({"scope": scope_name, "analyte": analyte, "result_type": "raw_no_outlier_removal", "control_condition": control_val, "interference_condition": int_val})
-                paired_raw_rows.append(prow)
-                paired_detail_tables[f"paired_raw_{scope_name}_{analyte}"[:60]] = pdetail
-            pcrow, pcdetail = compare_paired(cleaned, analyte, cond_col, str(control_val), str(int_val), pair_cols, int(n_boot), bool(do_boot), int(seed))
-            if pcrow is not None:
-                pcrow.update({"scope": scope_name, "analyte": analyte, "result_type": "cleaned_after_outlier_rule", "control_condition": control_val, "interference_condition": int_val, "outlier_method": actual_outlier_method, "outlier_method_requested": outlier_method})
-                paired_clean_rows.append(pcrow)
-
-summary_raw = pd.DataFrame(summary_raw_rows)
-summary_clean = pd.DataFrame(summary_clean_rows)
-for tbl in [summary_raw, summary_clean]:
-    if not tbl.empty:
-        tbl["welch_t_q_BH_FDR_within_table"] = benjamini_hochberg(tbl["welch_t_p_primary"].values)
-        tbl["mann_whitney_q_BH_FDR_within_table"] = benjamini_hochberg(tbl["mann_whitney_p_robust"].values)
-
-paired_raw = pd.DataFrame(paired_raw_rows)
-paired_clean = pd.DataFrame(paired_clean_rows)
-for tbl in [paired_raw, paired_clean]:
-    if not tbl.empty and "paired_t_p" in tbl.columns:
-        tbl["paired_t_q_BH_FDR_within_table"] = benjamini_hochberg(tbl["paired_t_p"].values)
-        tbl["wilcoxon_q_BH_FDR_within_table"] = benjamini_hochberg(tbl["wilcoxon_p"].values)
-
-outlier_log = pd.concat(outlier_logs, ignore_index=True) if outlier_logs else pd.DataFrame(columns=["scope", "condition", "analyte", "removed_order", "outlier_method", "row_index", "batch_id", "sample_id", "device_id", "value_removed", "direction", "outlier_metric", "outlier_threshold", "gcrit_mode", "gcrit_alpha", "gcrit_tail", "details", "outlier_method_requested", "outlier_method_used"])
-global_flag_log = global_flag_audit(df_global_excluded[df_global_excluded[cond_col].astype(str).isin([str(control_val), str(int_val)])].copy(), analytes, cond_col, batch_col, sample_col, global_flag_col if global_flag_col != "None" else "")
-
-# Raw-vs-cleaned shift table
-shift_rows = []
-if not summary_raw.empty and not summary_clean.empty:
-    keys = ["scope", "analyte"]
-    raw_small = summary_raw[keys + ["mean_difference_I_minus_C", "percent_shift_mean", "welch_t_p_primary", "mann_whitney_p_robust"]].rename(columns={
-        "mean_difference_I_minus_C": "raw_mean_difference_I_minus_C",
-        "percent_shift_mean": "raw_percent_shift_mean",
-        "welch_t_p_primary": "raw_welch_p",
-        "mann_whitney_p_robust": "raw_mann_whitney_p",
-    })
-    clean_small = summary_clean[keys + ["mean_difference_I_minus_C", "percent_shift_mean", "welch_t_p_primary", "mann_whitney_p_robust", "n_outliers_removed"]].rename(columns={
-        "mean_difference_I_minus_C": "cleaned_mean_difference_I_minus_C",
-        "percent_shift_mean": "cleaned_percent_shift_mean",
-        "welch_t_p_primary": "cleaned_welch_p",
-        "mann_whitney_p_robust": "cleaned_mann_whitney_p",
-    })
-    sensitivity = pd.merge(raw_small, clean_small, on=keys, how="outer")
-    sensitivity["delta_mean_difference_cleaned_minus_raw"] = sensitivity["cleaned_mean_difference_I_minus_C"] - sensitivity["raw_mean_difference_I_minus_C"]
-    sensitivity["delta_percent_shift_cleaned_minus_raw"] = sensitivity["cleaned_percent_shift_mean"] - sensitivity["raw_percent_shift_mean"]
-else:
-    sensitivity = pd.DataFrame()
-
-counts = df2.groupby([cond_col, device_col_use], dropna=False).size().reset_index(name="n_rows")
+# Run the fully automated branch-selection pipeline.
+analysis = run_interference_analysis(
+    df_eligible, df_global_excluded,
+    cond_col=cond_col, control_val=str(control_val), int_val=str(int_val), device_col=device_col,
+    batch_col=batch_col, sample_col=sample_col, global_flag_col=global_flag_col, analytes=analytes,
+    device_mode=device_mode, paired_mode=paired_mode, do_boot=do_boot, n_boot=int(n_boot),
+    alpha=float(alpha), seed=int(seed), outlier_method=outlier_method,
+    max_remove_per_condition=int(max_remove_per_condition), gcrit_mode=gcrit_mode, gcrit=float(gcrit),
+    gcrit_alpha=float(gcrit_alpha), gcrit_tail=gcrit_tail, modified_z_threshold=float(modified_z_threshold),
+    robust_interval_z=float(robust_interval_z),
+)
+summary_raw = analysis["interference_summary_raw"]
+summary_clean = analysis["interference_summary_cleaned"]
+outlier_log = analysis["outlier_log"]
+global_flag_log = analysis["global flag TRUE"]
+counts = analysis["condition_device_counts"]
+paired_raw = analysis["paired_summary_raw"]
+paired_clean = analysis["paired_summary_cleaned"]
 
 st.subheader("4) Results: raw pooled/all devices primary table")
 st.dataframe(summary_raw[summary_raw["scope"] == "pooled_all_devices"], use_container_width=True)
@@ -723,16 +875,13 @@ st.dataframe(summary_raw[summary_raw["scope"] == "pooled_all_devices"], use_cont
 st.subheader("5) Results: cleaned/outlier-sensitivity pooled/all devices primary table")
 st.dataframe(summary_clean[summary_clean["scope"] == "pooled_all_devices"], use_container_width=True)
 
-st.subheader("6) Raw vs cleaned sensitivity table")
-st.dataframe(sensitivity[sensitivity["scope"] == "pooled_all_devices"] if not sensitivity.empty else sensitivity, use_container_width=True)
-
-st.subheader("7) Outlier log")
+st.subheader("6) Outlier log")
 if outlier_log.empty:
     st.info("No outliers removed, or outlier removal was set to None/0.")
 else:
     st.dataframe(outlier_log, use_container_width=True)
 
-st.subheader("8) Paired results, if matched")
+st.subheader("7) Optional paired diagnostic, if enabled")
 if paired_raw.empty and paired_clean.empty:
     st.info("No paired result could be created, or paired analysis was off.")
 else:
@@ -741,43 +890,23 @@ else:
     st.write("Cleaned paired results")
     st.dataframe(paired_clean, use_container_width=True)
 
-st.subheader("9) Condition/device counts")
+st.subheader("8) Condition/device counts")
 st.dataframe(counts, use_container_width=True)
 
-st.subheader("10) global_flag=TRUE exclusions")
+st.subheader("9) global_flag=TRUE exclusions")
 if global_flag_log.empty:
     st.info("No rows were excluded by global_flag, or all rows were explicitly treated as global_flag = FALSE.")
 else:
     st.dataframe(global_flag_log, use_container_width=True)
 
-settings = pd.DataFrame({
-    "setting": [
-        "condition_column", "control_condition", "interference_condition", "device_mode", "device_column",
-        "analytes", "paired_analysis", "bootstrap_95CI", "bootstrap_iterations", "significance_alpha", "random_seed",
-        "outlier_method", "max_outliers_per_condition_analyte_scope", "gcrit_mode", "manual_gcrit", "automatic_gcrit_alpha",
-        "automatic_gcrit_tail", "MAD_modified_z_threshold", "robust_interval_z", "global_flag_column", "treat_all_global_flag_as_false",
-        "primary_outcome_rule",
-    ],
-    "value": [
-        cond_col, control_val, int_val, device_mode, device_col, ", ".join(analytes), paired_mode, do_boot, n_boot, alpha, seed,
-        outlier_method, max_remove_per_condition, gcrit_mode, gcrit, gcrit_alpha, gcrit_tail, modified_z_threshold, robust_interval_z,
-        global_flag_col, treat_all_global_false,
-        "Shapiro residual normality: p>=0.05 -> Welch t-test; p<0.05 or not testable -> Mann-Whitney U",
-    ],
-})
 result_tables = {
     "interference_summary_raw": summary_raw,
     "interference_summary_cleaned": summary_clean,
     "outlier_log": outlier_log,
     "global flag TRUE": global_flag_log,
     "condition_device_counts": counts,
-    "raw_vs_cleaned_sensitivity": sensitivity,
 }
-if not paired_raw.empty:
-    result_tables["paired_summary_raw"] = paired_raw
-if not paired_clean.empty:
-    result_tables["paired_summary_cleaned"] = paired_clean
-excel_bytes = make_excel_output(result_tables, settings)
+excel_bytes = make_excel_output(result_tables)
 
 st.download_button(
     "Download combined Excel results",
@@ -785,4 +914,4 @@ st.download_button(
     "interference_results.xlsx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-st.success("Done. All results and audit tables are in one Excel workbook.")
+st.success("Done. The single Excel workbook matches the supplied five-sheet results template and reports one automatically selected inferential branch per analyte.")
